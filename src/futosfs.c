@@ -23,33 +23,67 @@ static inline void *get_block(uint32_t block_no) {
     return (char *)fs_mem + (block_no * TOSFS_BLOCK_SIZE);
 }
 
-// fonction getattr
-static void futosfs_ll_getattr(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi)
+//fonction de fill utilisée dans getattr et lookup
+static int fill_stat(fuse_ino_t ino, struct stat *stbuf)
 {
-    (void) fi; //pour éviter un warning à l'execution
-
- //On vérifie que l'inode est entre 1 et 31, et est allouée dans la bitmap
     if (ino < 1 || ino >= 32 || !(sb->inode_bitmap & (1 << ino))) {
-        fuse_reply_err(req, ENOENT);
-        return;
+        return -ENOENT;
     }
 
     struct tosfs_inode *ti = &inodes[ino];
+    memset(stbuf, 0, sizeof(struct stat));
+
+    stbuf->st_ino = ino;
+    stbuf->st_mode = ti->mode | ti->perm;
+    stbuf->st_nlink = ti->nlink;
+    stbuf->st_uid = ti->uid;
+    stbuf->st_gid = ti->gid;
+    stbuf->st_size = ti->size;
+    stbuf->st_blocks = (ti->size > 0) ? 1 : 0;
+    stbuf->st_blksize = TOSFS_BLOCK_SIZE;
+
+    return 0;
+}
+
+// fonction getattr
+static void futosfs_ll_getattr(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi)
+{
+    (void) fi;
     struct stat stbuf;
+
+    if (fill_stat(ino, &stbuf) != 0) {
+        fuse_reply_err(req, ENOENT);
+    } else {
+        fuse_reply_attr(req, &stbuf, 1.0);
+    }
+}
+
+// dirbuf : nécessaire pour accumuler les entrés de répertoire
+struct dirbuf {
+    char *p;
+    size_t size;
+};
+
+static void dirbuf_add(fuse_req_t req, struct dirbuf *b, const char *name, fuse_ino_t ino)
+{
+    struct stat stbuf;
+    size_t oldsize = b->size;
+    b->size += fuse_add_direntry(req, NULL, 0, name, NULL, 0);
+    b->p = (char *) realloc(b->p, b->size);
     memset(&stbuf, 0, sizeof(stbuf));
-
-    // on remplis la structure stat
     stbuf.st_ino = ino;
-    stbuf.st_mode = ti->mode | ti->perm;
-    stbuf.st_nlink = ti->nlink;
-    stbuf.st_uid = ti->uid;
-    stbuf.st_gid = ti->gid;
-    stbuf.st_size = ti->size;
-    stbuf.st_blocks = (ti->size > 0) ? 1 : 0;
-    stbuf.st_blksize = TOSFS_BLOCK_SIZE;
+    fuse_add_direntry(req, b->p + oldsize, b->size - oldsize, name, &stbuf, b->size);
+}
 
-    // Réponse à FUSE (ici 1.0 = durée de cache de 1 seconde)
-    fuse_reply_attr(req, &stbuf, 1.0);
+#define min(x, y) ((x) < (y) ? (x) : (y))
+
+static int reply_buf_limited(fuse_req_t req, const char *buf, size_t bufsize,
+                             off_t off, size_t maxsize)
+{
+    if (off < bufsize)
+        return fuse_reply_buf(req, buf + off, min(bufsize - off, maxsize));
+    else
+        return fuse_reply_buf(req, NULL, 0);
 }
 
 // readdir
@@ -57,12 +91,81 @@ static void futosfs_ll_readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
                               off_t off, struct fuse_file_info *fi)
 {
     (void) fi;
-    fuse_reply_err(req, ENOSYS);
+
+    // Vérification de l'inode
+    if (ino < 1 || ino >= 32 || !(sb->inode_bitmap & (1 << ino))) {
+        fuse_reply_err(req, ENOENT);
+        return;
+    }
+
+    struct tosfs_inode *dir_inode = &inodes[ino];
+
+    // verification dossier
+    if (!S_ISDIR(dir_inode->mode)) {
+        fuse_reply_err(req, ENOTDIR);
+        return;
+    }
+
+    struct dirbuf b;
+    memset(&b, 0, sizeof(b));
+
+    //ajouter . et ..
+    dirbuf_add(req, &b, ".", ino);
+    dirbuf_add(req, &b, "..", 1); /* Pour la racine, le parent est 1 */
+
+    struct tosfs_dentry *dentries = (struct tosfs_dentry *) get_block(dir_inode->block_no);
+    int max_dentries = TOSFS_BLOCK_SIZE / sizeof(struct tosfs_dentry);
+
+    for (int i = 0; i < max_dentries; i++) {
+        if (dentries[i].inode != 0) {
+            dirbuf_add(req, &b, dentries[i].name, dentries[i].inode);
+        }
+    }
+
+    //envoie du résultat
+    reply_buf_limited(req, b.p, b.size, off, size);
+    free(b.p);
 }
 
-// lookup
+//lookup
 static void futosfs_ll_lookup(fuse_req_t req, fuse_ino_t parent, const char *name)
 {
+    // Vérification que le parent existe et est bien un répertoire
+    if (parent < 1 || parent >= 32 || !(sb->inode_bitmap & (1 << parent))) {
+        fuse_reply_err(req, ENOENT);
+        return;
+    }
+
+    struct tosfs_inode *parent_inode = &inodes[parent];
+    if (!S_ISDIR(parent_inode->mode)) {
+        fuse_reply_err(req, ENOTDIR);
+        return;
+    }
+
+    struct tosfs_dentry *dentries = (struct tosfs_dentry *) get_block(parent_inode->block_no);
+    int max_dentries = TOSFS_BLOCK_SIZE / sizeof(struct tosfs_dentry);
+
+    for (int i = 0; i < max_dentries; i++) {
+        if (dentries[i].inode != 0 && strcmp(dentries[i].name, name) == 0) {
+           //fichier trouvé
+            struct fuse_entry_param e;
+            memset(&e, 0, sizeof(e));
+
+            e.ino = dentries[i].inode;
+            e.attr_timeout = 1.0;
+            e.entry_timeout = 1.0;
+
+            if (fill_stat(e.ino, &e.attr) != 0) {
+                fuse_reply_err(req, ENOENT);
+                return;
+            }
+
+            fuse_reply_entry(req, &e);
+            return;
+        }
+    }
+
+ //fichier pas trouvé
     fuse_reply_err(req, ENOENT);
 }
 
