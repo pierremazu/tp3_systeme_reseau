@@ -16,7 +16,6 @@ int main(int argc, char *argv[])
 
     const char *img_path = argv[1];
 
-    /* 1. Ouvrir le fichier image */
     int fd = open(img_path, O_RDWR);
     if (fd < 0) {
         perror("Erreur lors de l'ouverture du fichier image");

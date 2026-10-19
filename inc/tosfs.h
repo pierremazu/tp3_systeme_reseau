@@ -1,12 +1,10 @@
 /*
  * tosfs/tosfs.h
- * 
- * 
+ *
+ *
  * (c) 2012 David Picard - picard@ensea.fr
- * 
+ *
  */
-
-
 #ifndef __TOSFS__
 #define __TOSFS__
 
@@ -37,7 +35,7 @@ struct tosfs_superblock {
 /* on disk inode */
 struct tosfs_inode {
 	__u32 inode; /* inode number */
-	__u32 block_no; /* block number for data. 1 block per file. 
+	__u32 block_no; /* block number for data. 1 block per file.
 					   should be inode+TOSFS_INODE_BLOCK */
 	__u16 uid; /* user id */
 	__u16 gid; /* group id */
