@@ -24,8 +24,7 @@ static inline void *get_block(uint32_t block_no) {
 }
 
 //fonction de fill utilisée dans getattr et lookup
-static int fill_stat(fuse_ino_t ino, struct stat *stbuf)
-{
+static int fill_stat(fuse_ino_t ino, struct stat *stbuf){
     if (ino < 1 || ino >= 32 || !(sb->inode_bitmap & (1 << ino))) {
         return -ENOENT;
     }
@@ -46,8 +45,7 @@ static int fill_stat(fuse_ino_t ino, struct stat *stbuf)
 }
 
 // fonction getattr
-static void futosfs_ll_getattr(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi)
-{
+static void futosfs_ll_getattr(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi){
     (void) fi;
     struct stat stbuf;
 
@@ -64,8 +62,7 @@ struct dirbuf {
     size_t size;
 };
 
-static void dirbuf_add(fuse_req_t req, struct dirbuf *b, const char *name, fuse_ino_t ino)
-{
+static void dirbuf_add(fuse_req_t req, struct dirbuf *b, const char *name, fuse_ino_t ino){
     struct stat stbuf;
     size_t oldsize = b->size;
     b->size += fuse_add_direntry(req, NULL, 0, name, NULL, 0);
@@ -77,9 +74,7 @@ static void dirbuf_add(fuse_req_t req, struct dirbuf *b, const char *name, fuse_
 
 #define min(x, y) ((x) < (y) ? (x) : (y))
 
-static int reply_buf_limited(fuse_req_t req, const char *buf, size_t bufsize,
-                             off_t off, size_t maxsize)
-{
+static int reply_buf_limited(fuse_req_t req, const char *buf, size_t bufsize,off_t off, size_t maxsize){
     if (off < bufsize)
         return fuse_reply_buf(req, buf + off, min(bufsize - off, maxsize));
     else
@@ -87,9 +82,7 @@ static int reply_buf_limited(fuse_req_t req, const char *buf, size_t bufsize,
 }
 
 // readdir
-static void futosfs_ll_readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
-                              off_t off, struct fuse_file_info *fi)
-{
+static void futosfs_ll_readdir(fuse_req_t req, fuse_ino_t ino, size_t size,off_t off, struct fuse_file_info *fi){
     (void) fi;
 
     // Vérification de l'inode
@@ -128,8 +121,7 @@ static void futosfs_ll_readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
 }
 
 //lookup
-static void futosfs_ll_lookup(fuse_req_t req, fuse_ino_t parent, const char *name)
-{
+static void futosfs_ll_lookup(fuse_req_t req, fuse_ino_t parent, const char *name){
     // Vérification que le parent existe et est bien un répertoire
     if (parent < 1 || parent >= 32 || !(sb->inode_bitmap & (1 << parent))) {
         fuse_reply_err(req, ENOENT);
@@ -170,16 +162,34 @@ static void futosfs_ll_lookup(fuse_req_t req, fuse_ino_t parent, const char *nam
 }
 
 // open et read
-static void futosfs_ll_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi)
-{
+static void futosfs_ll_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi){
+    if (ino < 1 || ino >= 32 || !(sb->inode_bitmap & (1 << ino))) {
+        fuse_reply_err(req, ENOENT);
+        return;
+    }
+
+    if (S_ISDIR(inodes[ino].mode)) {
+        fuse_reply_err(req, EISDIR);
+        return;
+    }
+
     fuse_reply_open(req, fi);
 }
 
-static void futosfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size,
-                            off_t off, struct fuse_file_info *fi)
-{
+static void futosfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size,off_t off, struct fuse_file_info *fi){
     (void) fi;
-    fuse_reply_err(req, ENOSYS);
+
+    if (ino < 1 || ino >= 32 || !(sb->inode_bitmap & (1 << ino))) {
+        fuse_reply_err(req, ENOENT);
+        return;
+    }
+
+    struct tosfs_inode *ti = &inodes[ino];
+
+//on récupère le bloc de données
+    char *data = (char *) get_block(ti->block_no);
+
+    reply_buf_limited(req, data, ti->size, off, size);
 }
 
 //déclaration des operations fuse low level
@@ -195,8 +205,7 @@ static struct fuse_lowlevel_ops futosfs_oper = {
 
 // Fonction pour charger l'image tosfs avec mmap
 
-static int load_fs(const char *img_path)
-{
+static int load_fs(const char *img_path){
     int fd = open(img_path, O_RDWR);
     if (fd < 0) {
         perror("open(img_path)");
@@ -231,8 +240,7 @@ static int load_fs(const char *img_path)
     return 0;
 }
 
-int main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]){
     if (argc < 3) {
         fprintf(stderr, "Usage: %s <image_tosfs> <mountpoint> [options FUSE]\n", argv[0]);
         fprintf(stderr, "Exemple: %s test_tosfs_files /tmp/futosfs -d\n", argv[0]);
